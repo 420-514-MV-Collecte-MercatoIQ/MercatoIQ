@@ -1,0 +1,27 @@
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: mercatoiq-mongodb
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-mercatoiq_dev_pass}
+      MONGO_INITDB_DATABASE: ${MONGO_DB_NAME:-mercatoiq}
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongo_data:/data/db
+      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  mongo_data:
+    driver: local
