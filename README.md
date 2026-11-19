@@ -6,7 +6,7 @@ Plateforme d'analyse sportive et financière (« Moneyball ») croisant les perf
 
 ## Structure du Monorepo
 
-- **`/backend`** *(submodule)* : API REST **NestJS (TypeScript)** (`/api/v1/...`), authentification JWT + RBAC (`user`, `admin`), Swagger (`/api/docs`) et déclenchement du pipeline via `child_process.spawn`.
+- **`/backend`** *(submodule)* : API REST **NestJS (TypeScript)** (`/api/v1/...`), authentification JWT + RBAC (`user`, `admin`), cache **Redis** pour les endpoints à forte volumétrie (*high-request data* : agrégations Gold, KPIs, listes paginées), Swagger (`/api/docs`) et déclenchement du pipeline via `child_process.spawn`.
 - **`/pipeline`** : Pipeline **Python 3** (`pandas`, `numpy`, `pymongo`, `scikit-learn`) — Architecture Médaillon (**Bronze -> Silver -> Gold**) avec failover local dans `/pipeline/backup_data/`.
 - **`/frontend`** *(submodule)* : Client Web **React (Vite)** hébergeant le **User Dashboard (`/dashboard`)** et l'**Admin Dashboard (`/admin`)**.
 - **`/scripts/mongo-init.js`** : Script d'initialisation automatique des collections et des index uniques/composés MongoDB.
@@ -21,11 +21,12 @@ git submodule update --init --recursive
 cp .env.example .env
 ```
 
-### 2. Lancer MongoDB via Docker Compose
+### 2. Lancer MongoDB & Redis via Docker Compose
 ```bash
 docker compose up -d
 ```
-Le conteneur `mercatoiq-mongodb` écoute sur `localhost:27017` et exécute automatiquement `scripts/mongo-init.js` au premier démarrage.
+- `mercatoiq-mongodb` écoute sur `localhost:27017` et exécute automatiquement `scripts/mongo-init.js` au premier démarrage.
+- `mercatoiq-redis` (`redis:7-alpine`) écoute sur `localhost:6379` pour le cache des requêtes analytiques Gold et KPIs.
 
 ### 3. Installer l'environnement Python du Pipeline
 ```bash
