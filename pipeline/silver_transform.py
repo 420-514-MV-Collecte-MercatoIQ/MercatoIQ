@@ -302,3 +302,197 @@ def transform_silver_players(db, batch_size: int = 2000) -> dict:
     )
     print(f"[silver] silver_players: read={len(silver_df)}, written={written}")
     return {"read": len(silver_df), "written": written}
+
+
+def build_silver_appearances_df(
+    appearances_df: pd.DataFrame,
+    players_meta_df: pd.DataFrame,
+    games_meta_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Build normalized silver_appearances documents with referenced IDs,
+    age_at_match, and vectorized per_90 offensive metrics.
+    """
+    if appearances_df is None or appearances_df.empty:
+        return pd.DataFrame()
+
+    df = appearances_df.copy()
+    if "appearance_id" not in df.columns:
+        return pd.DataFrame()
+
+    df = df.dropna(subset=["appearance_id"]).copy()
+    df["appearance_id"] = df["appearance_id"].astype(str).str.strip()
+    df = df[df["appearance_id"] != ""].drop_duplicates(subset=["appearance_id"], keep="last")
+
+    df["player_id"] = pd.to_numeric(df.get("player_id"), errors="coerce")
+    df["game_id"] = pd.to_numeric(df.get("game_id"), errors="coerce")
+    df = df.dropna(subset=["player_id", "game_id"]).copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    df["player_id"] = df["player_id"].astype(int)
+    df["game_id"] = df["game_id"].astype(int)
+
+    club_col = "player_club_id" if "player_club_id" in df.columns else "club_id"
+    df["club_id"] = pd.to_numeric(df.get(club_col), errors="coerce")
+
+    df["minutes_played"] = (
+        pd.to_numeric(df.get("minutes_played"), errors="coerce")
+        .fillna(0)
+        .clip(lower=0, upper=120)
+        .astype(int)
+    )
+    for stat_col in ("goals", "assists", "yellow_cards", "red_cards"):
+        df[stat_col] = (
+            pd.to_numeric(df.get(stat_col), errors="coerce")
+            .fillna(0)
+            .clip(lower=0)
+            .astype(int)
+        )
+
+    # Merge lightweight player metadata (date_of_birth, position)
+    if players_meta_df is not None and not players_meta_df.empty:
+        p_meta = players_meta_df[["player_id", "date_of_birth", "position"]].copy()
+        p_meta["player_id"] = pd.to_numeric(p_meta["player_id"], errors="coerce")
+        p_meta = p_meta.dropna(subset=["player_id"]).drop_duplicates(subset=["player_id"])
+        p_meta["player_id"] = p_meta["player_id"].astype(int)
+        df = df.merge(p_meta, on="player_id", how="left", suffixes=("", "_p"))
+    else:
+        df["date_of_birth"] = None
+        df["position"] = "Unknown"
+
+    df["position"] = (
+        df["position"].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
+    )
+
+    # Merge game season and infer from match date when missing
+    if games_meta_df is not None and not games_meta_df.empty:
+        g_meta = games_meta_df[["game_id", "season"]].copy()
+        g_meta["game_id"] = pd.to_numeric(g_meta["game_id"], errors="coerce")
+        g_meta["season"] = pd.to_numeric(g_meta["season"], errors="coerce")
+        g_meta = g_meta.dropna(subset=["game_id"]).drop_duplicates(subset=["game_id"])
+        g_meta["game_id"] = g_meta["game_id"].astype(int)
+        df = df.merge(g_meta, on="game_id", how="left", suffixes=("", "_g"))
+    elif "season" not in df.columns:
+        df["season"] = np.nan
+    else:
+        df["season"] = pd.to_numeric(df["season"], errors="coerce")
+
+    match_dt = pd.to_datetime(df.get("date"), errors="coerce")
+    df["date"] = match_dt.dt.strftime("%Y-%m-%d").where(match_dt.notna(), None)
+
+    missing_season_mask = df["season"].isna() & match_dt.notna()
+    if missing_season_mask.any():
+        inferred = np.where(
+            match_dt.dt.month >= 7, match_dt.dt.year, match_dt.dt.year - 1
+        )
+        df.loc[missing_season_mask, "season"] = inferred[missing_season_mask]
+
+    # Compute age_at_match with pandas datetime arithmetic
+    dob_dt = pd.to_datetime(df["date_of_birth"], errors="coerce")
+    age_at_match = ((match_dt - dob_dt).dt.days / 365.25).round(2)
+    valid_age_mask = match_dt.notna() & dob_dt.notna() & (age_at_match >= 0)
+    df["age_at_match"] = age_at_match.where(valid_age_mask, None)
+
+    # Compute vectorized per_90 metrics with NumPy
+    mins = df["minutes_played"].to_numpy(dtype=float)
+    goals_arr = df["goals"].to_numpy(dtype=float)
+    assists_arr = df["assists"].to_numpy(dtype=float)
+
+    df["goals_per_90"] = np.where(mins > 0, np.round((goals_arr / mins) * 90.0, 4), 0.0)
+    df["assists_per_90"] = np.where(
+        mins > 0, np.round((assists_arr / mins) * 90.0, 4), 0.0
+    )
+    df["ga_per_90"] = np.round(df["goals_per_90"] + df["assists_per_90"], 4)
+
+    for int_col in ("club_id", "season"):
+        df[int_col] = pd.Series(
+            [int(v) if pd.notna(v) else None for v in df[int_col]],
+            index=df.index,
+            dtype=object,
+        )
+
+    output_cols = [
+        "appearance_id",
+        "player_id",
+        "game_id",
+        "club_id",
+        "competition_id",
+        "season",
+        "position",
+        "date",
+        "player_name",
+        "age_at_match",
+        "minutes_played",
+        "goals",
+        "assists",
+        "yellow_cards",
+        "red_cards",
+        "goals_per_90",
+        "assists_per_90",
+        "ga_per_90",
+    ]
+    for col in output_cols:
+        if col not in df.columns:
+            df[col] = None
+
+    return df[output_cols].reset_index(drop=True)
+
+
+def transform_silver_appearances(db, chunk_size: int = 10000) -> dict:
+    """Stream bronze_appearances in batches and upsert normalized silver_appearances."""
+    p_docs = list(
+        db[SILVER_COLLECTIONS["players"]].find(
+            {}, {"_id": 0, "player_id": 1, "date_of_birth": 1, "position": 1}
+        )
+    )
+    if not p_docs:
+        p_docs = list(
+            db[BRONZE_DATASETS["players"]["collection"]].find(
+                {}, {"_id": 0, "player_id": 1, "date_of_birth": 1, "position": 1}
+            )
+        )
+    players_meta_df = pd.DataFrame(p_docs)
+
+    g_docs = list(
+        db[BRONZE_DATASETS["games"]["collection"]].find(
+            {}, {"_id": 0, "game_id": 1, "season": 1}
+        )
+    )
+    games_meta_df = pd.DataFrame(g_docs)
+
+    bronze_col = db[BRONZE_DATASETS["appearances"]["collection"]]
+    silver_col = db[SILVER_COLLECTIONS["appearances"]]
+
+    total_read = 0
+    total_written = 0
+    batch = []
+
+    cursor = bronze_col.find({}, {"_id": 0, "_ingested_at": 0, "_source": 0}).batch_size(
+        chunk_size
+    )
+    for row in cursor:
+        batch.append(row)
+        if len(batch) >= chunk_size:
+            silver_df = build_silver_appearances_df(
+                pd.DataFrame(batch), players_meta_df, games_meta_df
+            )
+            docs = clean_records_for_mongo(silver_df)
+            total_read += len(batch)
+            total_written += _bulk_upsert(
+                silver_col, docs, key_field="appearance_id", batch_size=chunk_size
+            )
+            batch.clear()
+
+    if batch:
+        silver_df = build_silver_appearances_df(
+            pd.DataFrame(batch), players_meta_df, games_meta_df
+        )
+        docs = clean_records_for_mongo(silver_df)
+        total_read += len(batch)
+        total_written += _bulk_upsert(
+            silver_col, docs, key_field="appearance_id", batch_size=chunk_size
+        )
+
+    print(f"[silver] silver_appearances: read={total_read}, written={total_written}")
+    return {"read": total_read, "written": total_written}
