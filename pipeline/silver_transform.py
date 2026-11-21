@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
-from pymongo import ASCENDING, DESCENDING
-from config import SILVER_COLLECTIONS
+from pymongo import ASCENDING, DESCENDING, UpdateOne
+from config import BRONZE_DATASETS, SILVER_COLLECTIONS
 
 
 def ensure_silver_indexes(db):
@@ -101,3 +101,204 @@ def clean_records_for_mongo(df: pd.DataFrame) -> list[dict]:
         doc["_silver_updated_at"] = now_utc
         records.append(doc)
     return records
+
+
+def _bulk_upsert(collection, docs: list[dict], key_field: str, batch_size: int = 2000) -> int:
+    if not docs:
+        return 0
+    written = 0
+    for i in range(0, len(docs), batch_size):
+        chunk = docs[i : i + batch_size]
+        ops = [
+            UpdateOne({key_field: doc[key_field]}, {"$set": doc}, upsert=True)
+            for doc in chunk
+        ]
+        res = collection.bulk_write(ops, ordered=False)
+        written += res.upserted_count + res.modified_count
+    return written
+
+
+def build_silver_players_df(
+    players_df: pd.DataFrame,
+    clubs_df: pd.DataFrame,
+    valuations_df: pd.DataFrame,
+    max_valuations: int = 10,
+) -> pd.DataFrame:
+    """
+    Build normalized silver_players documents.
+    Embedded design choice: embed current_club summary and latest market_valuations
+    inside each player document so profile reads need zero joins.
+    """
+    if players_df is None or players_df.empty:
+        return pd.DataFrame()
+
+    df = players_df.copy()
+    df["player_id"] = pd.to_numeric(df.get("player_id"), errors="coerce")
+    df = df.dropna(subset=["player_id"]).copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    df["player_id"] = df["player_id"].astype(int)
+    df = df.drop_duplicates(subset=["player_id"], keep="last").reset_index(drop=True)
+
+    for col in ("current_club_id", "height_in_cm", "last_season"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        else:
+            df[col] = np.nan
+
+    for col in ("market_value_in_eur", "highest_market_value_in_eur"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
+        else:
+            df[col] = np.nan
+
+    dob_dt = pd.to_datetime(df.get("date_of_birth"), errors="coerce")
+    df["date_of_birth"] = dob_dt.dt.strftime("%Y-%m-%d").where(dob_dt.notna(), None)
+    now_ts = pd.Timestamp.utcnow().tz_localize(None)
+    age_series = ((now_ts - dob_dt).dt.days / 365.25).round(1)
+    df["age"] = age_series.where(dob_dt.notna(), None)
+
+    if "position" in df.columns:
+        df["position"] = (
+            df["position"].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
+        )
+    else:
+        df["position"] = "Unknown"
+
+    if "sub_position" in df.columns:
+        df["sub_position"] = df["sub_position"].where(df["sub_position"].notna(), None)
+    else:
+        df["sub_position"] = None
+
+    # Build club lookup for embedding current_club summary
+    club_lookup = {}
+    if clubs_df is not None and not clubs_df.empty:
+        c_df = clubs_df.copy()
+        c_df["club_id"] = pd.to_numeric(c_df.get("club_id"), errors="coerce")
+        c_df = c_df.dropna(subset=["club_id"])
+        for row in c_df.to_dict(orient="records"):
+            cid = int(row["club_id"])
+            comp = row.get("domestic_competition_id") or row.get("competition_id")
+            club_lookup[cid] = {
+                "club_id": cid,
+                "name": _to_native_python(row.get("name")),
+                "competition_id": _to_native_python(comp),
+            }
+
+    # Group recent market valuations per player
+    valuations_map: dict[int, list[dict]] = {}
+    if valuations_df is not None and not valuations_df.empty:
+        v_df = valuations_df.copy()
+        v_df["player_id"] = pd.to_numeric(v_df.get("player_id"), errors="coerce")
+        v_df["market_value_in_eur"] = pd.to_numeric(
+            v_df.get("market_value_in_eur"), errors="coerce"
+        )
+        v_df["date_dt"] = pd.to_datetime(v_df.get("date"), errors="coerce")
+        v_df = v_df.dropna(subset=["player_id", "market_value_in_eur", "date_dt"]).copy()
+        if not v_df.empty:
+            v_df["player_id"] = v_df["player_id"].astype(int)
+            v_df["date_str"] = v_df["date_dt"].dt.strftime("%Y-%m-%d")
+            v_df["current_club_id"] = pd.to_numeric(
+                v_df.get("current_club_id"), errors="coerce"
+            )
+            v_df = v_df.sort_values(["player_id", "date_str"], ascending=[True, False])
+
+            for pid, grp in v_df.groupby("player_id", sort=False):
+                snapshots = []
+                for r in grp.head(max_valuations).to_dict(orient="records"):
+                    cid_val = r.get("current_club_id")
+                    comp_val = r.get("player_club_domestic_competition_id") or r.get(
+                        "competition_id"
+                    )
+                    snapshots.append(
+                        {
+                            "date": r["date_str"],
+                            "market_value_in_eur": float(r["market_value_in_eur"]),
+                            "club_id": int(cid_val) if pd.notna(cid_val) else None,
+                            "competition_id": _to_native_python(comp_val),
+                        }
+                    )
+                valuations_map[int(pid)] = snapshots
+
+    embedded_clubs = []
+    embedded_vals = []
+    for row in df.to_dict(orient="records"):
+        pid = int(row["player_id"])
+        cid_raw = row.get("current_club_id")
+        cid = int(cid_raw) if pd.notna(cid_raw) else None
+        fallback_name = _to_native_python(row.get("current_club_name"))
+        fallback_comp = _to_native_python(
+            row.get("current_club_domestic_competition_id")
+        )
+
+        if cid is not None and cid in club_lookup:
+            club_obj = dict(club_lookup[cid])
+            if not club_obj.get("name") and fallback_name:
+                club_obj["name"] = fallback_name
+            if not club_obj.get("competition_id") and fallback_comp:
+                club_obj["competition_id"] = fallback_comp
+        elif cid is not None or fallback_name is not None:
+            club_obj = {
+                "club_id": cid,
+                "name": fallback_name,
+                "competition_id": fallback_comp,
+            }
+        else:
+            club_obj = None
+
+        embedded_clubs.append(club_obj)
+        embedded_vals.append(valuations_map.get(pid, []))
+
+    df["current_club"] = embedded_clubs
+    df["market_valuations"] = embedded_vals
+
+    output_cols = [
+        "player_id",
+        "name",
+        "first_name",
+        "last_name",
+        "date_of_birth",
+        "age",
+        "country_of_citizenship",
+        "position",
+        "sub_position",
+        "foot",
+        "height_in_cm",
+        "market_value_in_eur",
+        "highest_market_value_in_eur",
+        "last_season",
+        "image_url",
+        "current_club",
+        "market_valuations",
+    ]
+    for col in output_cols:
+        if col not in df.columns:
+            df[col] = None
+
+    return df[output_cols]
+
+
+def transform_silver_players(db, batch_size: int = 2000) -> dict:
+    """Transform bronze_players + bronze_clubs + bronze_player_valuations into silver_players."""
+    proj = {"_id": 0, "_ingested_at": 0, "_source": 0}
+    players_df = pd.DataFrame(
+        list(db[BRONZE_DATASETS["players"]["collection"]].find({}, proj))
+    )
+    clubs_df = pd.DataFrame(
+        list(db[BRONZE_DATASETS["clubs"]["collection"]].find({}, proj))
+    )
+    valuations_df = pd.DataFrame(
+        list(db[BRONZE_DATASETS["player_valuations"]["collection"]].find({}, proj))
+    )
+
+    silver_df = build_silver_players_df(players_df, clubs_df, valuations_df)
+    docs = clean_records_for_mongo(silver_df)
+    written = _bulk_upsert(
+        db[SILVER_COLLECTIONS["players"]],
+        docs,
+        key_field="player_id",
+        batch_size=batch_size,
+    )
+    print(f"[silver] silver_players: read={len(silver_df)}, written={written}")
+    return {"read": len(silver_df), "written": written}
