@@ -4,22 +4,36 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
-from config import get_db, BACKUP_DATA_DIR
+from bronze_ingest import run_bronze_layer
+from config import BACKUP_DATA_DIR, get_db
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Orchestrateur du pipeline MercatoIQ (Bronze -> Silver -> Gold)")
+    parser = argparse.ArgumentParser(
+        description="MercatoIQ Data Pipeline Orchestrator (Bronze -> Silver -> Gold)"
+    )
     parser.add_argument(
         "--trigger",
         choices=["cron", "manual", "crud"],
         default="manual",
-        help="Origine du declenchement du pipeline",
+        help="What triggered this pipeline run",
     )
     parser.add_argument(
         "--layer",
         choices=["all", "bronze", "silver", "gold"],
         default="all",
-        help="Couche(s) a executer (ex: 'gold' lors d'une mutation CRUD)",
+        help="Which medallion layer(s) to run",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip CDN downloads and read strictly from pipeline/backup_data/",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Optional max rows per dataset (handy for quick dev tests)",
     )
     return parser.parse_args()
 
@@ -42,13 +56,30 @@ def main():
         "duration_ms": 0,
         "records_processed": 0,
         "error_message": None,
+        "details": {},
     }
     db.pipeline_logs.insert_one(log_entry)
-    print(f"[MercatoIQ Pipeline] Run {run_id} demarre (trigger={args.trigger}, layer={args.layer})")
+    print(
+        f"[MercatoIQ Pipeline] Run {run_id} started "
+        f"(trigger={args.trigger}, layer={args.layer}, offline={args.offline})"
+    )
 
     try:
         records_processed = 0
-        # Les modules bronze / silver / gold seront branches dans PIPE-01, PIPE-02, PIPE-03
+        details = {}
+
+        if args.layer in ("all", "bronze"):
+            bronze_stats = run_bronze_layer(
+                db=db,
+                offline=args.offline,
+                limit=args.limit,
+            )
+            records_processed += bronze_stats["total_processed"]
+            details["bronze"] = bronze_stats["tables"]
+
+        # TODO (PIPE-02): hook silver transformation here
+        # TODO (PIPE-03): hook gold aggregations + ML model here
+
         duration_ms = int((time.perf_counter() - t0) * 1000)
 
         db.pipeline_logs.update_one(
@@ -58,11 +89,15 @@ def main():
                     "status": "success",
                     "duration_ms": duration_ms,
                     "records_processed": records_processed,
+                    "details": details,
                     "completed_at": datetime.now(timezone.utc),
                 }
             },
         )
-        print(f"[MercatoIQ Pipeline] Run {run_id} termine avec succes en {duration_ms}ms")
+        print(
+            f"[MercatoIQ Pipeline] Run {run_id} finished in {duration_ms}ms "
+            f"({records_processed} records)"
+        )
         return 0
 
     except Exception as exc:
@@ -78,7 +113,7 @@ def main():
                 }
             },
         )
-        print(f"[MercatoIQ Pipeline] Erreur sur le run {run_id}: {exc}", file=sys.stderr)
+        print(f"[MercatoIQ Pipeline] Run {run_id} failed: {exc}", file=sys.stderr)
         return 1
 
 
