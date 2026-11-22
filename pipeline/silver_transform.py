@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 from pymongo import ASCENDING, DESCENDING, UpdateOne
-from config import BRONZE_DATASETS, SILVER_COLLECTIONS
+from config import BRONZE_DATASETS, MIN_SEASON, SILVER_COLLECTIONS, get_db
 
 
 def ensure_silver_indexes(db):
@@ -496,3 +496,148 @@ def transform_silver_appearances(db, chunk_size: int = 10000) -> dict:
 
     print(f"[silver] silver_appearances: read={total_read}, written={total_written}")
     return {"read": total_read, "written": total_written}
+
+
+def build_silver_transfers_df(
+    transfers_df: pd.DataFrame, min_season: int = MIN_SEASON
+) -> pd.DataFrame:
+    """
+    Build normalized silver_transfers documents with referenced IDs,
+    parsed season start year, normalized EUR amounts, and fee-to-value ratio.
+    """
+    if transfers_df is None or transfers_df.empty:
+        return pd.DataFrame()
+
+    df = transfers_df.copy()
+    if "transfer_id" not in df.columns:
+        return pd.DataFrame()
+
+    df = df.dropna(subset=["transfer_id"]).copy()
+    df["transfer_id"] = df["transfer_id"].astype(str).str.strip()
+    df = df[df["transfer_id"] != ""].drop_duplicates(subset=["transfer_id"], keep="last")
+
+    for id_col in ("player_id", "from_club_id", "to_club_id"):
+        df[id_col] = pd.to_numeric(df.get(id_col), errors="coerce")
+
+    df = df.dropna(subset=["player_id", "from_club_id", "to_club_id"]).copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    for id_col in ("player_id", "from_club_id", "to_club_id"):
+        df[id_col] = df[id_col].astype(int)
+
+    dt_series = pd.to_datetime(df.get("transfer_date"), errors="coerce")
+    df["transfer_date"] = dt_series.dt.strftime("%Y-%m-%d").where(dt_series.notna(), None)
+
+    raw_seasons = df["transfer_season"] if "transfer_season" in df.columns else [None] * len(df)
+    parsed_seasons = [
+        parse_transfer_season(s_val, d_val)
+        for s_val, d_val in zip(raw_seasons, df["transfer_date"])
+    ]
+    df["season"] = pd.to_numeric(pd.Series(parsed_seasons, index=df.index), errors="coerce")
+    df = df.dropna(subset=["season"]).copy()
+    df["season"] = df["season"].astype(int)
+    df = df[df["season"] >= min_season].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    fee_series = (
+        pd.to_numeric(df.get("transfer_fee"), errors="coerce")
+        .fillna(0.0)
+        .clip(lower=0.0)
+        .astype(float)
+    )
+    mv_series = pd.to_numeric(df.get("market_value_in_eur"), errors="coerce").astype(float)
+
+    df["transfer_fee"] = fee_series
+    df["market_value_in_eur"] = mv_series
+    df["is_free_transfer"] = fee_series == 0.0
+
+    fee_arr = fee_series.to_numpy(dtype=float)
+    mv_arr = mv_series.to_numpy(dtype=float)
+    df["fee_to_value_ratio"] = np.where(
+        (mv_arr > 0) & (~np.isnan(mv_arr)), np.round(fee_arr / mv_arr, 4), np.nan
+    )
+
+    output_cols = [
+        "transfer_id",
+        "player_id",
+        "player_name",
+        "from_club_id",
+        "to_club_id",
+        "from_club_name",
+        "to_club_name",
+        "transfer_date",
+        "transfer_season",
+        "season",
+        "transfer_fee",
+        "market_value_in_eur",
+        "is_free_transfer",
+        "fee_to_value_ratio",
+    ]
+    for col in output_cols:
+        if col not in df.columns:
+            df[col] = None
+
+    return df[output_cols].reset_index(drop=True)
+
+
+def transform_silver_transfers(db, chunk_size: int = 5000) -> dict:
+    """Stream bronze_transfers and upsert normalized silver_transfers."""
+    bronze_col = db[BRONZE_DATASETS["transfers"]["collection"]]
+    silver_col = db[SILVER_COLLECTIONS["transfers"]]
+
+    total_read = 0
+    total_written = 0
+    batch = []
+
+    cursor = bronze_col.find({}, {"_id": 0, "_ingested_at": 0, "_source": 0}).batch_size(
+        chunk_size
+    )
+    for row in cursor:
+        batch.append(row)
+        if len(batch) >= chunk_size:
+            silver_df = build_silver_transfers_df(pd.DataFrame(batch))
+            docs = clean_records_for_mongo(silver_df)
+            total_read += len(batch)
+            total_written += _bulk_upsert(
+                silver_col, docs, key_field="transfer_id", batch_size=chunk_size
+            )
+            batch.clear()
+
+    if batch:
+        silver_df = build_silver_transfers_df(pd.DataFrame(batch))
+        docs = clean_records_for_mongo(silver_df)
+        total_read += len(batch)
+        total_written += _bulk_upsert(
+            silver_col, docs, key_field="transfer_id", batch_size=chunk_size
+        )
+
+    print(f"[silver] silver_transfers: read={total_read}, written={total_written}")
+    return {"read": total_read, "written": total_written}
+
+
+def run_silver_layer(db=None) -> dict:
+    """Execute full Bronze -> Silver transformation across players, appearances, and transfers."""
+    if db is None:
+        db = get_db()
+
+    ensure_silver_indexes(db)
+
+    players_stats = transform_silver_players(db)
+    appearances_stats = transform_silver_appearances(db)
+    transfers_stats = transform_silver_transfers(db)
+
+    collections = {
+        "silver_players": players_stats,
+        "silver_appearances": appearances_stats,
+        "silver_transfers": transfers_stats,
+    }
+    total_processed = (
+        players_stats["read"] + appearances_stats["read"] + transfers_stats["read"]
+    )
+    return {"total_processed": total_processed, "collections": collections}
+
+
+if __name__ == "__main__":
+    run_silver_layer()
