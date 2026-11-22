@@ -21,6 +21,9 @@ venv/
 env/
 .pytest_cache/
 *.egg-info/
+pipeline/backup_data/*.csv
+pipeline/backup_data/*.csv.gz
+pipeline/backup_data/*.tmp
 
 # MongoDB local volume
 mongo_data/
