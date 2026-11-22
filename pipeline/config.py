@@ -78,6 +78,12 @@ BRONZE_DATASETS = {
     },
 }
 
+SILVER_COLLECTIONS = {
+    "players": "silver_players",
+    "appearances": "silver_appearances",
+    "transfers": "silver_transfers",
+}
+
 
 def get_db():
     """Returns a connected MongoDB database handle for MercatoIQ."""

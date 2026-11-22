@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from bronze_ingest import run_bronze_layer
 from config import BACKUP_DATA_DIR, get_db
+from silver_transform import run_silver_layer
 
 
 def parse_args():
@@ -77,7 +78,11 @@ def main():
             records_processed += bronze_stats["total_processed"]
             details["bronze"] = bronze_stats["tables"]
 
-        # TODO (PIPE-02): hook silver transformation here
+        if args.layer in ("all", "silver"):
+            silver_stats = run_silver_layer(db=db)
+            records_processed += silver_stats["total_processed"]
+            details["silver"] = silver_stats["collections"]
+
         # TODO (PIPE-03): hook gold aggregations + ML model here
 
         duration_ms = int((time.perf_counter() - t0) * 1000)
