@@ -155,7 +155,7 @@ def build_silver_players_df(
 
     dob_dt = pd.to_datetime(df.get("date_of_birth"), errors="coerce")
     df["date_of_birth"] = dob_dt.dt.strftime("%Y-%m-%d").where(dob_dt.notna(), None)
-    now_ts = pd.Timestamp.utcnow().tz_localize(None)
+    now_ts = pd.Timestamp.now("UTC").tz_localize(None)
     age_series = ((now_ts - dob_dt).dt.days / 365.25).round(1)
     df["age"] = age_series.where(dob_dt.notna(), None)
 
@@ -183,6 +183,7 @@ def build_silver_players_df(
             club_lookup[cid] = {
                 "club_id": cid,
                 "name": _to_native_python(row.get("name")),
+                "club_name": _to_native_python(row.get("name")),
                 "competition_id": _to_native_python(comp),
             }
 
@@ -215,6 +216,7 @@ def build_silver_players_df(
                         {
                             "date": r["date_str"],
                             "market_value_in_eur": float(r["market_value_in_eur"]),
+                            "market_value_eur": float(r["market_value_in_eur"]),
                             "club_id": int(cid_val) if pd.notna(cid_val) else None,
                             "competition_id": _to_native_python(comp_val),
                         }
@@ -236,12 +238,14 @@ def build_silver_players_df(
             club_obj = dict(club_lookup[cid])
             if not club_obj.get("name") and fallback_name:
                 club_obj["name"] = fallback_name
+                club_obj["club_name"] = fallback_name
             if not club_obj.get("competition_id") and fallback_comp:
                 club_obj["competition_id"] = fallback_comp
         elif cid is not None or fallback_name is not None:
             club_obj = {
                 "club_id": cid,
                 "name": fallback_name,
+                "club_name": fallback_name,
                 "competition_id": fallback_comp,
             }
         else:
@@ -252,20 +256,28 @@ def build_silver_players_df(
 
     df["current_club"] = embedded_clubs
     df["market_valuations"] = embedded_vals
+    df["player_name"] = df.get("name")
+    df["nationality"] = df.get("country_of_citizenship")
+    df["height_cm"] = df.get("height_in_cm")
+    df["current_market_value_eur"] = df.get("market_value_in_eur")
 
     output_cols = [
         "player_id",
         "name",
+        "player_name",
         "first_name",
         "last_name",
         "date_of_birth",
         "age",
         "country_of_citizenship",
+        "nationality",
         "position",
         "sub_position",
         "foot",
         "height_in_cm",
+        "height_cm",
         "market_value_in_eur",
+        "current_market_value_eur",
         "highest_market_value_in_eur",
         "last_season",
         "image_url",
@@ -396,12 +408,15 @@ def build_silver_appearances_df(
 
     # Compute vectorized per_90 metrics with NumPy
     mins = df["minutes_played"].to_numpy(dtype=float)
+    safe_mins = np.where(mins > 0, mins, 1.0)
     goals_arr = df["goals"].to_numpy(dtype=float)
     assists_arr = df["assists"].to_numpy(dtype=float)
 
-    df["goals_per_90"] = np.where(mins > 0, np.round((goals_arr / mins) * 90.0, 4), 0.0)
+    df["goals_per_90"] = np.where(
+        mins > 0, np.round((goals_arr / safe_mins) * 90.0, 4), 0.0
+    )
     df["assists_per_90"] = np.where(
-        mins > 0, np.round((assists_arr / mins) * 90.0, 4), 0.0
+        mins > 0, np.round((assists_arr / safe_mins) * 90.0, 4), 0.0
     )
     df["ga_per_90"] = np.round(df["goals_per_90"] + df["assists_per_90"], 4)
 
@@ -550,7 +565,9 @@ def build_silver_transfers_df(
     mv_series = pd.to_numeric(df.get("market_value_in_eur"), errors="coerce").astype(float)
 
     df["transfer_fee"] = fee_series
+    df["transfer_fee_eur"] = fee_series
     df["market_value_in_eur"] = mv_series
+    df["market_value_at_transfer_eur"] = mv_series
     df["is_free_transfer"] = fee_series == 0.0
 
     fee_arr = fee_series.to_numpy(dtype=float)
@@ -571,7 +588,9 @@ def build_silver_transfers_df(
         "transfer_season",
         "season",
         "transfer_fee",
+        "transfer_fee_eur",
         "market_value_in_eur",
+        "market_value_at_transfer_eur",
         "is_free_transfer",
         "fee_to_value_ratio",
     ]
