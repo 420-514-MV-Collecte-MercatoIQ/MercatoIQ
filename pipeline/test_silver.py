@@ -83,7 +83,12 @@ class TestSilverTransform(unittest.TestCase):
 
         self.assertEqual(
             doc["current_club"],
-            {"club_id": 11, "name": "Arsenal FC", "competition_id": "GB1"},
+            {
+                "club_id": 11,
+                "name": "Arsenal FC",
+                "club_name": "Arsenal FC",
+                "competition_id": "GB1",
+            },
         )
         self.assertEqual(len(doc["market_valuations"]), 2)
         self.assertEqual(doc["market_valuations"][0]["date"], "2024-06-01")
