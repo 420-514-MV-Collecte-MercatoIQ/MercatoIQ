@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from bronze_ingest import run_bronze_layer
 from config import BACKUP_DATA_DIR, get_db
+from gold_layer import run_gold_layer
 from silver_transform import run_silver_layer
 
 
@@ -83,7 +84,12 @@ def main():
             records_processed += silver_stats["total_processed"]
             details["silver"] = silver_stats["collections"]
 
-        # TODO (PIPE-03): hook gold aggregations + ML model here
+        if args.layer in ("all", "gold"):
+            gold_stats = run_gold_layer(db=db)
+            records_processed += gold_stats["total_processed"]
+            details["gold"] = gold_stats["collections"]
+
+        # TODO (PIPE-03c): add Q2 ML scouting & Q4 super-subs in Week 3
 
         duration_ms = int((time.perf_counter() - t0) * 1000)
 
