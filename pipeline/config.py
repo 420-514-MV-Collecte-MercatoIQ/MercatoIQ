@@ -84,6 +84,13 @@ SILVER_COLLECTIONS = {
     "transfers": "silver_transfers",
 }
 
+GOLD_COLLECTIONS = {
+    "club_roi": "gold_club_transfer_roi",
+    "ucl_vs_domestic": "gold_ucl_vs_domestic",
+    "undervalued_scouting": "gold_undervalued_scouting",
+    "super_subs": "gold_super_subs",
+}
+
 
 def get_db():
     """Returns a connected MongoDB database handle for MercatoIQ."""
