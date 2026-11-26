@@ -57,12 +57,12 @@ flowchart LR
 
 ## 🎯 The 4 Analytical Questions (Gold Layer)
 
-| # | Analytical Question | Gold Collection | Key Metrics Exposed |
-| :---: | :--- | :--- | :--- |
-| **Q1** | **Club Financial Transfer ROI:** *Which clubs achieve the highest offensive output per million EUR spent on transfer fees?* | `gold_club_transfer_roi` | `total_spend_m_eur`, `total_ga`, `ga_per_m_eur` |
-| **Q2** | **U23 Talent Scouting + ML (+5pt Bonus):** *Which U23 players outperform their market value based on `per_90` output and our ML regression model?* | `gold_undervalued_scouting` | `market_value_in_eur`, `fair_market_value_eur`, `valuation_delta` |
-| **Q3** | **Big-Match Pressure (UCL vs. Domestic):** *Which players and clubs step up or drop off in the UEFA Champions League (`CL`) vs. Top 5 domestic leagues?* | `gold_ucl_vs_domestic` | `ga_per_90_ucl`, `ga_per_90_domestic`, `pressure_delta` |
-| **Q4** | **Late-Game Super-Subs:** *Which substitutes generate the highest rate of decisive goals and assists after the 70th minute?* | `gold_super_subs` | `sub_appearances`, `late_ga_70_plus`, `late_ga_rate` |
+| # | Analytical Question | Gold Collection | Key Metrics Exposed | Status |
+| :---: | :--- | :--- | :--- | :---: |
+| **Q1** | **Club Financial Transfer ROI:** *Which clubs achieve the highest value gain & offensive output per EUR spent on transfers?* | `gold_club_transfer_roi` | `total_fees_paid_eur`, `total_value_gain_eur`, `roi`, `ga_per_m_eur` | ✅ **Week 2** |
+| **Q3** | **Big-Match Pressure (UCL vs. Domestic):** *Which players step up or drop off in the UEFA Champions League (`CL`) vs. Top 5 domestic leagues?* | `gold_ucl_vs_domestic` | `ucl_goals_per_90`, `domestic_goals_per_90`, `goals_per_90_delta` | ✅ **Week 2** |
+| **Q2** | **U23 Talent Scouting + ML (+5pt Bonus):** *Which U23 players outperform their market value based on `per_90` output and our ML model?* | `gold_undervalued_scouting` | `market_value_eur`, `estimated_value_eur`, `undervalue_ratio` | 🔜 **Week 3** |
+| **Q4** | **Late-Game Super-Subs:** *Which substitutes generate the highest decisive goal contribution rate off the bench?* | `gold_super_subs` | `sub_appearances`, `sub_goal_contributions_per_90`, `super_sub_score` | 🔜 **Week 3** |
 
 ---
 
@@ -126,10 +126,13 @@ The pipeline orchestrator ([`pipeline/run_pipeline.py`](file:///home/haroune/Doc
 # Run only Bronze -> Silver normalization
 .venv/bin/python pipeline/run_pipeline.py --trigger manual --layer silver
 
+# Run Week 2 Gold aggregations (Q1 Club ROI & Q3 UCL vs Domestic)
+.venv/bin/python pipeline/run_pipeline.py --trigger manual --layer gold
+
 # Verify Bronze document counts, unique indexes & >100,000 observation requirement
 .venv/bin/python pipeline/check_bronze.py
 
-# Run Python unit test suite (Bronze + Silver transformations)
+# Run Python unit test suite (Bronze + Silver + Gold Q1/Q3)
 .venv/bin/python -m unittest discover -s pipeline -p "test_*.py" -v
 ```
 
@@ -143,14 +146,19 @@ MercatoIQ/
 ├── frontend/                    # [Submodule] React (Vite) Web Client (/dashboard & /admin)
 ├── pipeline/                    # Python 3 Medallion ETL & Machine Learning Pipeline
 │   ├── backup_data/             # Local .csv.gz / .csv failover directory
-│   ├── config.py                # Env config, Mongo connection, CDN URLs & collection registry
+│   ├── config.py                # Env config, Mongo connection, CDN URLs & Bronze/Silver/Gold registry
 │   ├── downloader.py            # Atomic R2 CDN downloader with automatic local failover
 │   ├── bronze_ingest.py         # Chunked idempotent Bronze ingestion & unique index enforcement
 │   ├── silver_transform.py      # Pandas/NumPy cleaning, age_at_match, per_90 & Embedded/Referenced builders
+│   ├── gold_common.py           # Gold index creation & idempotent batch upserts
+│   ├── gold_club_roi.py         # Q1 aggregation: club transfer ROI & G+A per EUR spent
+│   ├── gold_ucl_vs_domestic.py  # Q3 aggregation: UCL vs Top-5 domestic per-90 comparison
+│   ├── gold_layer.py            # Gold layer orchestrator
 │   ├── run_pipeline.py          # CLI entrypoint invoked by NestJS child_process.spawn
 │   ├── check_bronze.py          # Verification CLI for unique indexes & >100k observation target
 │   ├── test_bronze.py           # Unit tests for failover, NaN cleaning & deterministic transfer_id
-│   └── test_silver.py           # Unit tests for embedded players, per_90 NumPy math & season parsing
+│   ├── test_silver.py           # Unit tests for embedded players, per_90 NumPy math & season parsing
+│   └── test_gold.py             # Unit tests for Gold Q1 Club ROI & Q3 UCL vs Domestic calculations
 ├── scripts/
 │   └── mongo-init.js            # Docker startup script creating Bronze/Silver/Gold collections & indexes
 ├── docker-compose.yml           # Local MongoDB 7.0 + Redis 7-alpine services
@@ -165,10 +173,10 @@ Tracked on our public **[GitHub Project Board — MercatoIQ (420-514)](https://g
 
 | Member | Primary Ownership | Current Status |
 | :--- | :--- | :--- |
-| **`@Haroune07`** | Monorepo Infra, Docker, Python Pipeline (Bronze / Silver / Gold / ML) | ✅ `INFRA-01`, `BACK-01`, `PIPE-01`, `PIPE-02` Done · 🔜 `PIPE-03` (Gold + ML) |
-| **`@amineelghazi`** | Mongoose Schemas (Silver/Gold), Paginated CRUD, Gold API & Redis Cache | 🔜 `BACK-02`, `BACK-03`, `BACK-04`, `BACK-05` |
-| **`@ddryad`** | Auth JWT/Bcrypt, RBAC (`user`/`admin`), API Security, Pipeline Spawn & React Core | ✅ `SEC-01` Merged · 🔜 `SEC-02`, `FRONT-01`, `OPS-01` |
-| **`@Sirmator`** | React UI Views (`Login`/`Register`, `/dashboard` 4 Gold Charts, CRUD Modals & `/admin`) | 🔜 `FRONT-02`, `FRONT-03`, `FRONT-04` |
+| **`@Haroune07`** | Monorepo Infra, Docker, Python Pipeline (Bronze / Silver / Gold / ML) | ✅ `INFRA-01`, `BACK-01`, `PIPE-01`, `PIPE-02` Done · 🔄 `PIPE-03a`/`PIPE-03b` (Q1 & Q3) · 🔜 `PIPE-03c` (Week 3) |
+| **`@amineelghazi`** | Mongoose Schemas (Silver/Gold), Paginated CRUD, Gold API & Redis Cache | ✅ `BACK-02`, `BACK-03` Merged · 🔜 `BACK-04a` (Q1/Q3 API), `BACK-05` (Redis) |
+| **`@ddryad`** | Auth JWT/Bcrypt, RBAC (`user`/`admin`), API Security, Pipeline Spawn & React Core | ✅ `SEC-01`, `FRONT-01` Merged · 🔜 `SEC-02`, `OPS-01` |
+| **`@Sirmator`** | React UI Views + Standalone Clubs/Competitions Backend Module | ✅ `FRONT-02` Merged · 🔜 `BACK-06` (`/clubs` & `/competitions` API), `FRONT-03` (Q1/Q3), `FRONT-04` |
 
 ### Branching Convention
 - **`main`** — Stable production & milestone releases.
