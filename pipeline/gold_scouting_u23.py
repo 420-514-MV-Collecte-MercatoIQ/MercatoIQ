@@ -1,9 +1,31 @@
 from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
-from config import TARGET_COMPETITIONS
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.model_selection import KFold, cross_val_predict
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from config import BRONZE_DATASETS, GOLD_COLLECTIONS, SILVER_COLLECTIONS, TARGET_COMPETITIONS
+from gold_common import save_gold_docs
+from silver_transform import clean_records_for_mongo
 
 DOMESTIC_LEAGUES = {"GB1", "ES1", "IT1", "L1", "FR1"}
+
+NUMERIC_FEATURES = [
+    "age",
+    "minutes_played",
+    "appearances",
+    "goals_per_90",
+    "assists_per_90",
+    "ga_per_90",
+    "yellow_cards",
+    "red_cards",
+    "season",
+]
+CATEGORICAL_FEATURES = ["position", "competition_id"]
 
 
 def _build_club_lookup(clubs_df: pd.DataFrame | None) -> dict[int, tuple[str | None, str | None]]:
@@ -105,10 +127,13 @@ def prepare_u23_feature_df(
     df["season"] = df["season"].astype(int)
 
     for col in ("goals", "assists", "minutes_played", "yellow_cards", "red_cards"):
-        df[col] = pd.to_numeric(df.get(col), errors="coerce").fillna(0).clip(lower=0).astype(int)
+        series = df[col] if col in df.columns else pd.Series(0, index=df.index)
+        df[col] = pd.to_numeric(series, errors="coerce").fillna(0).clip(lower=0).astype(int)
 
-    df["age_at_match"] = pd.to_numeric(df.get("age_at_match"), errors="coerce")
-    df["club_id"] = pd.to_numeric(df.get("club_id"), errors="coerce")
+    age_series = df["age_at_match"] if "age_at_match" in df.columns else pd.Series(np.nan, index=df.index)
+    df["age_at_match"] = pd.to_numeric(age_series, errors="coerce")
+    club_series = df["club_id"] if "club_id" in df.columns else pd.Series(np.nan, index=df.index)
+    df["club_id"] = pd.to_numeric(club_series, errors="coerce")
     if "competition_id" not in df.columns:
         df["competition_id"] = None
 
@@ -192,4 +217,210 @@ def prepare_u23_feature_df(
 
     if not records:
         return pd.DataFrame()
-    return pd.DataFrame(records).sort_values(["season", "minutes_played"], ascending=[False, False]).reset_index(drop=True)
+    return (
+        pd.DataFrame(records)
+        .sort_values(["season", "minutes_played"], ascending=[False, False])
+        .reset_index(drop=True)
+    )
+
+
+def _build_preprocessor() -> ColumnTransformer:
+    return ColumnTransformer(
+        transformers=[
+            ("num", StandardScaler(), NUMERIC_FEATURES),
+            ("cat", OneHotEncoder(handle_unknown="ignore"), CATEGORICAL_FEATURES),
+        ]
+    )
+
+
+def fit_and_predict_u23_values(feature_df: pd.DataFrame) -> tuple[np.ndarray, dict]:
+    """
+    Compare Ridge regression vs RandomForestRegressor on log1p(market_value_eur),
+    selecting the best cross-validated estimator on R2 (and falling back cleanly on small inputs).
+    """
+    if feature_df.empty:
+        return np.array([], dtype=float), {"model": "none", "r2": None, "mae_eur": None}
+
+    X = feature_df[NUMERIC_FEATURES + CATEGORICAL_FEATURES].copy()
+    y_eur = feature_df["market_value_eur"].to_numpy(dtype=float)
+    y_log = np.log1p(y_eur)
+
+    n_samples = len(feature_df)
+    if n_samples < 5:
+        pipe = Pipeline([("prep", _build_preprocessor()), ("reg", Ridge(alpha=2.0))])
+        pipe.fit(X, y_log)
+        preds_eur = np.maximum(50_000.0, np.expm1(pipe.predict(X)))
+        metrics = {
+            "model": "Ridge(alpha=2.0)",
+            "r2": round(float(r2_score(y_eur, preds_eur)), 4) if n_samples >= 2 else None,
+            "mae_eur": round(float(mean_absolute_error(y_eur, preds_eur)), 2),
+        }
+        return preds_eur, metrics
+
+    candidates = {
+        "Ridge": Pipeline([("prep", _build_preprocessor()), ("reg", Ridge(alpha=5.0))]),
+        "RandomForestRegressor": Pipeline(
+            [
+                ("prep", _build_preprocessor()),
+                (
+                    "reg",
+                    RandomForestRegressor(
+                        n_estimators=80,
+                        max_depth=6,
+                        min_samples_leaf=3,
+                        random_state=42,
+                        n_jobs=-1,
+                    ),
+                ),
+            ]
+        ),
+    }
+
+    n_splits = min(5, n_samples)
+    cv = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+    best_name = "Ridge"
+    best_r2 = float("-inf")
+    best_preds_eur = y_eur
+    best_mae = float("inf")
+
+    for name, estimator in candidates.items():
+        oof_log = cross_val_predict(estimator, X, y_log, cv=cv)
+        oof_eur = np.maximum(50_000.0, np.expm1(oof_log))
+        score_r2 = float(r2_score(y_log, oof_log))
+        score_mae = float(mean_absolute_error(y_eur, oof_eur))
+        if score_r2 > best_r2:
+            best_name = name
+            best_r2 = score_r2
+            best_mae = score_mae
+            best_preds_eur = oof_eur
+
+    metrics = {
+        "model": best_name,
+        "r2": round(best_r2, 4),
+        "mae_eur": round(best_mae, 2),
+    }
+    return best_preds_eur, metrics
+
+
+def build_scouting_u23_df(
+    players_df: pd.DataFrame,
+    appearances_df: pd.DataFrame,
+    clubs_df: pd.DataFrame | None = None,
+    min_minutes: int = 450,
+    max_age: int = 23,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Question 2 (ML): Estimate fair transfer market value for U23 players and rank
+    undervalued scouting targets by `undervalue_ratio = estimated_value_eur / market_value_eur`.
+    """
+    feat_df = prepare_u23_feature_df(
+        players_df=players_df,
+        appearances_df=appearances_df,
+        clubs_df=clubs_df,
+        min_minutes=min_minutes,
+        max_age=max_age,
+    )
+    if feat_df.empty:
+        return pd.DataFrame(), {"model": "none", "r2": None, "mae_eur": None}
+
+    preds_eur, metrics = fit_and_predict_u23_values(feat_df)
+    rounded_preds = np.round(preds_eur, -3)
+
+    out_df = feat_df.copy()
+    out_df["estimated_value_eur"] = rounded_preds.astype(float)
+    out_df["undervalue_ratio"] = np.round(
+        out_df["estimated_value_eur"] / out_df["market_value_eur"], 4
+    )
+    out_df["club_id"] = pd.Series(out_df["club_id"], index=out_df.index, dtype=object)
+
+    cols = [
+        "player_id",
+        "player_name",
+        "season",
+        "competition_id",
+        "position",
+        "market_value_eur",
+        "estimated_value_eur",
+        "undervalue_ratio",
+        "goals_per_90",
+        "assists_per_90",
+        "minutes_played",
+        "age",
+        "club_id",
+        "club_name",
+    ]
+    return (
+        out_df[cols].sort_values("undervalue_ratio", ascending=False).reset_index(drop=True),
+        metrics,
+    )
+
+
+def run_gold_scouting_u23(db) -> dict:
+    """Read Silver/Bronze collections, train U23 fair-value ML model, and save to Gold."""
+    players_df = pd.DataFrame(
+        list(
+            db[SILVER_COLLECTIONS["players"]].find(
+                {},
+                {
+                    "_id": 0,
+                    "player_id": 1,
+                    "player_name": 1,
+                    "name": 1,
+                    "position": 1,
+                    "date_of_birth": 1,
+                    "age": 1,
+                    "current_club": 1,
+                    "current_club_id": 1,
+                    "current_club_name": 1,
+                    "current_market_value_eur": 1,
+                    "market_value_in_eur": 1,
+                },
+            )
+        )
+    )
+    appearances_df = pd.DataFrame(
+        list(
+            db[SILVER_COLLECTIONS["appearances"]].find(
+                {},
+                {
+                    "_id": 0,
+                    "player_id": 1,
+                    "season": 1,
+                    "competition_id": 1,
+                    "club_id": 1,
+                    "age_at_match": 1,
+                    "minutes_played": 1,
+                    "goals": 1,
+                    "assists": 1,
+                    "yellow_cards": 1,
+                    "red_cards": 1,
+                },
+            )
+        )
+    )
+    clubs_df = pd.DataFrame(
+        list(
+            db[BRONZE_DATASETS["clubs"]["collection"]].find(
+                {}, {"_id": 0, "club_id": 1, "name": 1, "domestic_competition_id": 1}
+            )
+        )
+    )
+
+    scouting_df, ml_metrics = build_scouting_u23_df(players_df, appearances_df, clubs_df)
+    docs = clean_records_for_mongo(scouting_df)
+    now_utc = datetime.now(timezone.utc)
+    for doc in docs:
+        doc.pop("_silver_updated_at", None)
+        doc["computed_at"] = now_utc
+
+    written = save_gold_docs(
+        db[GOLD_COLLECTIONS["undervalued_scouting"]],
+        docs,
+        key_fields=["player_id", "season"],
+    )
+    print(
+        f"[gold] gold_undervalued_scouting: read={len(scouting_df)}, written={written}, "
+        f"model={ml_metrics.get('model')}, r2={ml_metrics.get('r2')}, mae_eur={ml_metrics.get('mae_eur')}"
+    )
+    return {"read": len(scouting_df), "written": written, "ml_metrics": ml_metrics}
