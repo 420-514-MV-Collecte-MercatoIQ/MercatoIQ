@@ -1,7 +1,6 @@
 [submodule "backend"]
 	path = backend
-	url = https://github.com/amineelghazi/MercatoIQ-backend.git
+	url = https://github.com/420-514-MV-Collecte-MercatoIQ/MercatoIQ-backend.git
 [submodule "frontend"]
 	path = frontend
-	url = https://github.com/amineelghazi/MercatoIQ-frontend.git
-	branch = develop
+	url = https://github.com/420-514-MV-Collecte-MercatoIQ/MercatoIQ-frontend.git
