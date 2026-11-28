@@ -89,8 +89,6 @@ def main():
             records_processed += gold_stats["total_processed"]
             details["gold"] = gold_stats["collections"]
 
-        # TODO (PIPE-03c): add Q2 ML scouting & Q4 super-subs in Week 3
-
         duration_ms = int((time.perf_counter() - t0) * 1000)
 
         db.pipeline_logs.update_one(

@@ -3,7 +3,7 @@ from config import GOLD_COLLECTIONS
 
 
 def ensure_gold_indexes(db):
-    """Create unique and ranking indexes for the Week 2 Gold collections."""
+    """Create unique and ranking indexes across all four Gold analytical collections."""
     club_roi = db[GOLD_COLLECTIONS["club_roi"]]
     club_roi.create_index([("club_id", ASCENDING), ("season", ASCENDING)], unique=True)
     club_roi.create_index([("season", ASCENDING), ("roi", DESCENDING)])
@@ -18,7 +18,37 @@ def ensure_gold_indexes(db):
             ("position", ASCENDING),
         ]
     )
-    print("[gold] indexes ready for club_roi and ucl_vs_domestic")
+
+    scouting = db[GOLD_COLLECTIONS["undervalued_scouting"]]
+    scouting.create_index([("player_id", ASCENDING), ("season", ASCENDING)], unique=True)
+    scouting.create_index(
+        [
+            ("competition_id", ASCENDING),
+            ("season", ASCENDING),
+            ("undervalue_ratio", DESCENDING),
+        ]
+    )
+    scouting.create_index(
+        [("season", ASCENDING), ("position", ASCENDING), ("undervalue_ratio", DESCENDING)]
+    )
+
+    super_subs = db[GOLD_COLLECTIONS["super_subs"]]
+    super_subs.create_index(
+        [("player_id", ASCENDING), ("season", ASCENDING), ("competition_id", ASCENDING)],
+        unique=True,
+    )
+    super_subs.create_index(
+        [
+            ("competition_id", ASCENDING),
+            ("season", ASCENDING),
+            ("super_sub_score", DESCENDING),
+        ]
+    )
+    super_subs.create_index(
+        [("season", ASCENDING), ("position", ASCENDING), ("super_sub_score", DESCENDING)]
+    )
+
+    print("[gold] indexes ready for all 4 gold collections")
 
 
 def save_gold_docs(
