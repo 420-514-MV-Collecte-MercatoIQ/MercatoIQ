@@ -18,6 +18,29 @@ export const options = {
   },
 };
 
+export function setup() {
+  if (__ENV.JWT_TOKEN) {
+    return { token: __ENV.JWT_TOKEN };
+  }
+
+  const email =
+    __ENV.K6_EMAIL || `k6.load.${Date.now()}.${Math.floor(Math.random() * 10000)}@mercatoiq.io`;
+  const password = __ENV.K6_PASSWORD || 'K6LoadTest2026!';
+  const headers = { 'Content-Type': 'application/json' };
+  const payload = JSON.stringify({ email, password });
+
+  let res = http.post(`${BASE_URL}/auth/login`, payload, { headers });
+  if (res.status !== 200) {
+    res = http.post(`${BASE_URL}/auth/register`, payload, { headers });
+  }
+
+  const token = res.json('access_token');
+  if (!token) {
+    throw new Error(`Failed to obtain JWT token for k6 setup (status=${res.status})`);
+  }
+  return { token };
+}
+
 function assertJsonOk(res, name) {
   check(res, {
     [`${name}: status 200`]: (r) => r.status === 200,
@@ -31,7 +54,11 @@ function assertJsonOk(res, name) {
   });
 }
 
-export default function () {
+export default function (data) {
+  const authParams = {
+    headers: { Authorization: `Bearer ${data.token}` },
+  };
+
   group('Health', () => {
     const res = http.get(`${BASE_URL}/health`, { tags: { endpoint: 'health' } });
     assertJsonOk(res, 'GET /health');
@@ -50,18 +77,20 @@ export default function () {
     ];
 
     for (const [label, url] of analyticsRoutes) {
-      const res = http.get(url, { tags: { endpoint: 'analytics' } });
+      const res = http.get(url, { ...authParams, tags: { endpoint: 'analytics' } });
       assertJsonOk(res, `GET /analytics/${label}`);
     }
   });
 
   group('Silver Paginated Endpoints', () => {
     const playersRes = http.get(`${BASE_URL}/players?page=1&limit=20`, {
+      ...authParams,
       tags: { endpoint: 'silver' },
     });
     assertJsonOk(playersRes, 'GET /players');
 
     const transfersRes = http.get(`${BASE_URL}/transfers?season=${SEASON}&page=1&limit=20`, {
+      ...authParams,
       tags: { endpoint: 'silver' },
     });
     assertJsonOk(transfersRes, 'GET /transfers');
