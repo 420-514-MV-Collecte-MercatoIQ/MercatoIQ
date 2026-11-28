@@ -1,0 +1,36 @@
+{
+  "run_id": "a97fd1ec-14f2-479e-8835-837d899c65b9",
+  "trigger_type": "manual",
+  "layer": "gold",
+  "status": "success",
+  "started_at": "2026-11-28T02:34:20.651000+00:00",
+  "duration_ms": 7149,
+  "records_processed": 8232,
+  "error_message": null,
+  "details": {
+    "gold": {
+      "gold_club_transfer_roi": {
+        "read": 6608,
+        "written": 6608
+      },
+      "gold_undervalued_scouting": {
+        "read": 452,
+        "written": 452,
+        "ml_metrics": {
+          "model": "RandomForestRegressor",
+          "r2": 0.2554,
+          "mae_eur": 1113883.84
+        }
+      },
+      "gold_ucl_vs_domestic": {
+        "read": 362,
+        "written": 362
+      },
+      "gold_super_subs": {
+        "read": 810,
+        "written": 810
+      }
+    }
+  },
+  "completed_at": "2026-11-28T02:34:27.801000+00:00"
+}
