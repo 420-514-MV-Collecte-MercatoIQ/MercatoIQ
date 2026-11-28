@@ -107,8 +107,14 @@ cp .env.example .env
 npm install
 npm run start:dev
 ```
-- **Healthcheck:** [`http://localhost:3000/api/v1/health`](http://localhost:3000/api/v1/health)
-- **Swagger UI:** [`http://localhost:3000/api/docs`](http://localhost:3000/api/docs) *(See [backend/README.md](file:///home/haroune/Documents/TP%20Final%20Collecte/MercatoIQ/backend/README.md) for full API details)*
+- **Healthcheck:** [`http://localhost:3000/api/v1/health`](http://localhost:3000/api/v1/health) (`@Public()`)
+- **Swagger UI:** [`http://localhost:3000/api/docs`](http://localhost:3000/api/docs) *(typed OpenAPI 3 schemas + persistent JWT Bearer Authorize; see [backend/README.md](backend/README.md))*
+- **API Route Groups (`/api/v1`):**
+  - `Auth` (`@Public()`): `POST /auth/register`, `POST /auth/login`
+  - `Players` (JWT): `GET /players`, `GET /players/:id`, `POST /players`, `PATCH /players/:id`, `DELETE /players/:id`
+  - `Transfers` (JWT): `GET /transfers`, `GET /transfers/:id`, `POST /transfers`, `PATCH /transfers/:id`, `DELETE /transfers/:id`
+  - `Analytics (Gold)` (JWT): `GET /analytics/kpis`, `/club-roi`, `/scouting-u23`, `/ucl-vs-domestic`, `/super-subs`
+- **Postman Route Tests:** [`backend/docs/postman/MercatoIQ.postman_collection.json`](backend/docs/postman/MercatoIQ.postman_collection.json) & [`MercatoIQ.postman_environment.json`](backend/docs/postman/MercatoIQ.postman_environment.json) (`npm run test:postman` in `backend/`)
 
 ---
 
@@ -173,10 +179,10 @@ Tracked on our public **[GitHub Project Board — MercatoIQ (420-514)](https://g
 
 | Member | Primary Ownership | Current Status |
 | :--- | :--- | :--- |
-| **`@Haroune07`** | Monorepo Infra, Docker, Python Pipeline (Bronze / Silver / Gold / ML) | ✅ `INFRA-01`, `BACK-01`, `PIPE-01`, `PIPE-02` Done · 🔄 `PIPE-03a`/`PIPE-03b` (Q1 & Q3) · 🔜 `PIPE-03c` (Week 3) |
-| **`@amineelghazi`** | Mongoose Schemas (Silver/Gold), Paginated CRUD, Gold API & Redis Cache | ✅ `BACK-02`, `BACK-03` Merged · 🔜 `BACK-04a` (Q1/Q3 API), `BACK-05` (Redis) |
-| **`@ddryad`** | Auth JWT/Bcrypt, RBAC (`user`/`admin`), API Security, Pipeline Spawn & React Core | ✅ `SEC-01`, `FRONT-01` Merged · 🔜 `SEC-02`, `OPS-01` |
-| **`@Sirmator`** | React UI Views + Standalone Clubs/Competitions Backend Module | ✅ `FRONT-02` Merged · 🔜 `BACK-06` (`/clubs` & `/competitions` API), `FRONT-03` (Q1/Q3), `FRONT-04` |
+| **`@Haroune07`** | Monorepo Infra, Docker, Python Pipeline (Bronze / Silver / Gold / ML) & QA | ✅ `INFRA-01`, `BACK-01`, `PIPE-01`, `PIPE-02`, `PIPE-03a`/`PIPE-03b` Done · 🔄 `PIPE-03c` (Q2/Q4), `TEST-03` (k6/CI), `QA-02` |
+| **`@amineelghazi`** | Mongoose Schemas (Silver/Gold), Paginated CRUD, Gold API & Redis Cache | ✅ `BACK-02`, `BACK-03`, `BACK-04` (Q1–Q4 API), `DOCS-01` (Swagger) Merged/Done · 🔜 `BACK-05` (Redis), `TEST-01` |
+| **`@ddryad`** | Auth JWT/Bcrypt, RBAC (`user`/`admin`), API Security & Pipeline Spawn | ✅ `SEC-01` Merged · 🔜 `SEC-02`, `OPS-01`, `TEST-02` |
+| **`@Sirmator`** | React UI Views + Standalone Clubs/Competitions Backend Module | ✅ `FRONT-01`, `FRONT-02` Merged · 🔄 `BACK-06` (`/clubs` & `/competitions` PR `#7`), `FRONT-03`/`FRONT-04` |
 
 ### Branching Convention
 - **`main`** — Stable production & milestone releases.
